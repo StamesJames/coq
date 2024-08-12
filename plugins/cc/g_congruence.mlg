@@ -34,3 +34,11 @@ END
 TACTIC EXTEND f_equal
 | [ "f_equal" ] -> { f_equal }
 END
+
+VERNAC COMMAND EXTEND MyHelloWorld CLASSIFIED AS QUERY
+| [ "MyHelloWorld" ] -> {Feedback.msg_debug (Pp.str "MyHelloWorld")}
+END
+
+VERNAC COMMAND EXTEND IsProjectable CLASSIFIED AS QUERY
+| [ "IsProjectable" constr(e) natural(i) ] -> {Projectability.is_projectable_command e i}
+END
