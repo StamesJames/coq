@@ -31,73 +31,63 @@ type extraction_result =
   | Composition of (EConstr.t * extraction_result) list
   | Index of int * extraction_result
 
-let rec is_extractable env sigma term_to_extract term_from_to_extract is_top_level:
+let rec find_arg env sigma term_to_extract args is_top_level =
+  Seq.find_map
+    (fun (i, x) ->
+      let result = is_extractable env sigma term_to_extract x is_top_level in
+      match result with NotExtractable -> None | _ -> Some (i, result))
+    (Array.to_seqi args)
+
+and find_composition env sigma term_to_extract_from is_top_level term_to_extract
+    =
+  EConstr.fold sigma
+    (fun acc t ->
+      match acc with
+      | Composition l -> (
+          let new_result =
+            is_extractable env sigma t term_to_extract_from is_top_level
+          in
+          match new_result with
+          | NotExtractable -> NotExtractable
+          | r -> Composition ((t, r) :: l))
+      | _ -> NotExtractable)
+    (Composition []) term_to_extract
+
+and is_extractable env sigma term_to_extract term_to_extract_from is_top_level :
     extraction_result =
   let open Pp in
   let print t = Printer.pr_econstr_env env sigma t in
   Feedback.msg_debug
     (str "extraction test " ++ print term_to_extract ++ str " from "
-   ++ print term_from_to_extract);
-  if EConstr.eq_constr_nounivs sigma term_to_extract term_from_to_extract then (
+   ++ print term_to_extract_from);
+  if EConstr.eq_constr_nounivs sigma term_to_extract term_to_extract_from then (
     Feedback.msg_debug (str "is Id");
     Id)
   else (
     Feedback.msg_debug (str "not eq");
-    match EConstr.kind sigma term_from_to_extract with
+    match EConstr.kind sigma term_to_extract_from with
     | App (f, args) -> (
         match EConstr.kind sigma f with
         | Construct (c, _) -> (
             Feedback.msg_debug (str "Construct");
             let first_arg_option =
-              Seq.find_map
-                (fun (i, x) ->
-                  let result = is_extractable env sigma term_to_extract x false in
-                  match result with
-                  | NotExtractable -> None
-                  | _ -> Some (Projection (c, i, result)))
-                (Array.to_seqi args)
+              find_arg env sigma term_to_extract args false
             in
             match first_arg_option with
-            | Some result -> result
+            | Some (i, result) -> Projection (c, i, result)
             | None ->
-                EConstr.fold sigma
-                  (fun acc t ->
-                    match acc with
-                    | Composition l -> (
-                        let new_result =
-                          is_extractable env sigma t term_from_to_extract is_top_level
-                        in
-                        match new_result with
-                        | NotExtractable -> NotExtractable
-                        | r -> Composition ((t, r) :: l))
-                    | _ -> NotExtractable)
-                  (Composition []) term_to_extract)
-        | Ind _ when is_top_level-> (
+                find_composition env sigma term_to_extract_from false
+                  term_to_extract)
+        | Ind _ when is_top_level -> (
             Feedback.msg_debug (str "Ind");
             let first_arg_option =
-              Seq.find_map
-                (fun (i, x) ->
-                  let result = is_extractable env sigma term_to_extract x false in
-                  match result with
-                  | NotExtractable -> None
-                  | _ -> Some (Index (i, result)))
-                (Array.to_seqi args)
+              find_arg env sigma term_to_extract args true
             in
             match first_arg_option with
-            | Some result -> result
+            | Some (i, result) -> Index (i, result)
             | None ->
-                EConstr.fold sigma
-                  (fun acc t ->
-                    match acc with
-                    | Composition l -> (
-                        let new_result =
-                          is_extractable env sigma t term_from_to_extract is_top_level
-                        in
-                        match new_result with
-                        | NotExtractable -> NotExtractable
-                        | r -> Composition ((t, r) :: l))
-                    | _ -> NotExtractable)
-                  (Composition []) term_to_extract)
+                find_composition env sigma term_to_extract_from true
+                  term_to_extract)
         | _ ->
             Feedback.msg_debug (str "no Constructor");
             NotExtractable)
@@ -116,11 +106,13 @@ let is_projectable env sigma term i : projectable_result =
   let print t = Printer.pr_econstr_env env sigma t in
   Feedback.msg_debug
     (str "projectability test of " ++ print term ++ str " on index " ++ Pp.int i);
-  let term_kind = EConstr.kind sigma term in
-  match term_kind with
-  | Construct (c, _) ->
+  match EConstr.kind sigma term with
+  | Construct (c, u) ->
       if i >= 0 && i < Inductiveops.constructor_nallargs env c then (
-        let sigma, constructor_type = Typing.type_of env sigma term in
+        (* let sigma, constructor_type = Typing.type_of env sigma term in *)
+        let constructor_type =
+          Inductiveops.e_type_of_constructor env sigma (c, u)
+        in
         let field_env, field_type, field_target =
           get_ith_field_type env constructor_type i
         in
@@ -136,7 +128,8 @@ let is_projectable env sigma term i : projectable_result =
         let field_sigma = Evd.from_env field_env in
         if is_dependent field_sigma field_type i then
           match
-            is_extractable target_env target_sigma lifted_field_type target_type true
+            is_extractable target_env target_sigma lifted_field_type target_type
+              true
           with
           | NotExtractable -> NotProjectable
           | r -> Dependent r
