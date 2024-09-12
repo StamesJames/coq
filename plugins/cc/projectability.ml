@@ -26,6 +26,8 @@ let rec is_dependent sigma term i =
   else if Termops.dependent sigma (EConstr.mkRel i) term then true
   else is_dependent sigma term (i - 1)
 
+let annot_of_string_numbered s i r = 
+  Context.make_annot (Names.Name.mk_name (Nameops.make_ident s (i))) r
 
 
 type extraction = 
@@ -143,37 +145,38 @@ let rec build_extraction env sigma type_to_extract term term_type extraction_res
     let next_term =  EConstr.mkRel (1 + nargs - i ) in 
     let constructor_type = Inductiveops.e_type_of_constructor env sigma c in
     let (_, next_term_type, _) = get_ith_field_type env constructor_type i in
-    let default = EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, type_to_extract, EConstr.mkRel 1) in 
+    let default = EConstr.mkLambda (annot_of_string_numbered "t" None EConstr.ERelevance.relevant, type_to_extract, EConstr.mkRel 1) in 
     let special = build_extraction env sigma type_to_extract next_term next_term_type next_extraction_result in
     Combinators.make_selector env sigma ~pos ~special ~default term term_type
   )
 
-let annot_of_string_numbered s i r = 
-  Context.make_annot (Names.Name.mk_name (Nameops.make_ident s (i))) r
 
-let rec push_ind_param_index_asums env sigma term i =
-  match EConstr.kind sigma term with
-  | Prod (name,ty,rest) ->(
-    let new_env = (Termops.push_rel_assum ((annot_of_string_numbered "i" (Some i) EConstr.ERelevance.relevant),ty) env) in 
-    push_ind_param_index_asums new_env sigma rest (i+1)
-  )
-  | t -> Termops.push_rel_assum ((annot_of_string_numbered "e" None EConstr.ERelevance.relevant),term) env
 
-let rec push_extraction_defaults env sigma composition_result i = 
-  match composition_result with
-  | Global -> env
-  | Composition ((f,f_composition), args_compositions) ->(
-      let env = push_extraction_defaults env sigma f_composition i in 
-      Seq.fold_left
-      (fun env (j,(_,arg_composition)) -> push_extraction_defaults env sigma arg_composition (i+1+j))
-      env
-      (Array.to_seqi args_compositions)
-  )
-  | FromIndex (_, term_type, _, _) -> Termops.push_rel_assum ((annot_of_string_numbered "d" (Some i) EConstr.ERelevance.relevant), term_type) env 
+let get_index_list_annots env sigma term =
+  let rec helper term i l = 
+    match EConstr.kind sigma term with
+    | Prod (name,ty,rest) ->(
+      let annot = ((annot_of_string_numbered "i" (Some i) EConstr.ERelevance.relevant),ty) in 
+      helper term (i+1) (annot::l)
+    )
+    | t -> (((annot_of_string_numbered "e" None EConstr.ERelevance.relevant),term)::l,i+1)
+  in 
+    helper  term 0 []
 
-let build_projection_env env sigma inductive composition_result = 
-  let env = push_ind_param_index_asums env sigma (Inductiveops.type_of_inductive env inductive) 1 in 
-  push_extraction_defaults env sigma composition_result 1
+let get_default_list_annots env sigma composition_result = 
+  let rec helper composition_result i l =
+    match composition_result with
+    | Global -> (l,i)
+    | Composition ((f,f_composition), args_compositions) ->(
+        let (f_list,i) = helper f_composition i l in 
+        Array.fold_left
+        (fun (l,i) (_,arg_composition) -> helper arg_composition i l)
+        (f_list,i)
+        (args_compositions)
+    )
+    | FromIndex (_, term_type, _, _) -> ((annot_of_string_numbered "d" (Some i) EConstr.ERelevance.relevant, term_type)::l, i+1)
+  in
+    helper composition_result 0 []
 
 let build_simple_projection env sigma ((((_,pos),_) as c)) term i =
   let nargs = Inductiveops.constructor_nallargs env (fst  c) in 
@@ -181,51 +184,47 @@ let build_simple_projection env sigma ((((_,pos),_) as c)) term i =
   let (sigma, term_type) = Typing.type_of env sigma term in
   let constructor_type = Inductiveops.e_type_of_constructor env sigma c in
   let (_, next_term_type, _) = get_ith_field_type env constructor_type i in
-  let default = EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, next_term_type, EConstr.mkRel 1) in 
+  let default = EConstr.mkLambda (annot_of_string_numbered "t" None EConstr.ERelevance.relevant, next_term_type, EConstr.mkRel 1) in 
   Combinators.make_selector env sigma ~pos ~special ~default term term_type
 
-let rec build_dependent_projection_type env sigma composition_result nth_extraction =
+let build_dependent_projection_type env sigma composition_result default_annots_list n_default_annots index_annots_list n_index_annots =
+  let rec helper composition_result nth_extraction =
   match composition_result with 
   | Composition ((f,f_composition), args_compositions) ->(
-    let (nth_extraction, f_extraction) = build_dependent_projection_type env sigma f_composition nth_extraction in 
-    let args_extractions_options = Array.make (Array.length args_compositions) None in 
-    let nth_extraction = 
-      fst @@ Array.fold_left
-      (fun (nth_extraction, i) (arg,arg_composition) ->(
-        let (nth_extraction, arg_extraction) = build_dependent_projection_type env sigma arg_composition nth_extraction in 
-        args_extractions_options.(i) <- Some arg_extraction; 
-        (nth_extraction, i+1)
-      ))
-      (nth_extraction, 0)
-      args_compositions in
-    let args_extractions = Array.map Option.get args_extractions_options in
+    let (nth_extraction, f_extraction) = helper f_composition nth_extraction in 
+    let (nth_extraction, args_extractions) = Array.fold_left_map (fun nth_extraction arg_composition ->(
+      helper (snd arg_composition) nth_extraction
+    )) nth_extraction args_compositions in 
     (nth_extraction, EConstr.mkApp (f_extraction, args_extractions))
   )
   | FromIndex (t,type_to_extract,i,extraction) ->(
-    let (term_index,_,term_type) = Termops.lookup_rel_id (Nameops.make_ident "i" (Some i)) (Environ.rel_context env) in 
-    let extraction_term = build_extraction env sigma type_to_extract (EConstr.mkRel term_index) (EConstr.of_constr term_type) extraction in 
-    let (default_index,_,_) = Termops.lookup_rel_id (Nameops.make_ident "d" (Some nth_extraction)) (Environ.rel_context env) in 
-    (nth_extraction+1, EConstr.mkApp (extraction_term, [|EConstr.mkRel default_index|]))
-    
+    let term_index = n_default_annots + i + 1 in
+    let (_,term_type) = List.nth index_annots_list (i+1 -1) in 
+    let extraction_term = build_extraction env sigma type_to_extract (EConstr.mkRel term_index) term_type extraction in 
+    (nth_extraction+1, EConstr.mkApp (extraction_term, [|EConstr.mkRel nth_extraction|]))
   )
   | Global -> raise NOT_YET_IMPLEMENTED
+  in 
+    snd (helper composition_result 1)
+
 
 let build_projection env sigma term i = 
   match EConstr.kind sigma term with
   | Construct (((ind,pos),u) as c) ->(
     match is_projectable env sigma term i with
     | Simple -> Some (build_simple_projection env sigma c term i)
-    | Dependent r ->(
-      let env = build_projection_env env sigma (ind,u) r in
-      let constroctor_type = Inductiveops.type_of_constructor env c in
-      let (_,field_type,_) = get_ith_field_type env constroctor_type i in
-      let projection_type = build_dependent_projection_type env sigma r 1 in 
-      let default = EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, snd projection_type, EConstr.mkRel 1) in
+    | Dependent composition_result ->(
+      let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
+      let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
+      let (default_annots_list, n_default_annots) = get_default_list_annots env sigma composition_result in
+      let projection_type = build_dependent_projection_type env sigma composition_result default_annots_list n_default_annots index_annots_list n_index_annots in 
+      let default = EConstr.mkLambda (annot_of_string_numbered "t" None EConstr.ERelevance.relevant, projection_type, EConstr.mkRel 1) in
       let nargs = Inductiveops.constructor_nallargs env (fst  c) in 
       let special_index  =  EConstr.mkRel (1 + nargs - i ) in 
-      let special = EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, snd projection_type, special_index) in
-      let (e,_,e_type) = Termops.lookup_rel_id (Nameops.make_ident "e" None) (Environ.rel_context env) in 
-      Some (Combinators.make_selector env sigma ~pos ~special ~default (EConstr.mkRel e) (EConstr.of_constr e_type))
+      let special = EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, projection_type, special_index) in
+      let e_index = n_default_annots + 1 in
+      let (_,e_type) = List.nth index_annots_list 0 in
+      Some (Combinators.make_selector env sigma ~pos ~special ~default (EConstr.mkRel e_index) e_type)
     )
     | NotProjectable -> None
     | Error -> None
