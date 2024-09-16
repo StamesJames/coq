@@ -1,3 +1,5 @@
+MyHelloWorld.
+
 Inductive Inner : Type :=
 | innerI_nat : forall (x:nat), Inner
 | innerI_fun : forall (f:nat->Type), Inner
@@ -10,6 +12,11 @@ Inductive ExtractTest : Inner -> Inner -> Type :=
 | extractTestI_other : forall (x:nat) (f:nat->Type) (t:f x), ExtractTest (innerI_inner (innerI_nat x)) (innerI_fun f)
 | extractTestI_extra : forall inner, ExtractTest inner inner
 | extractTestI_extra_const: ExtractTest innerI_extra innerI_extra.
+
+IsProjectable S 0.
+BuildProjectable S 0.
+IsProjectable extractTestI 2.
+BuildProjectable extractTestI 2.
 
 Definition proj_extract_test_x (inner_ix:Inner) : nat -> nat.
 Proof.
