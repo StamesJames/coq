@@ -8,15 +8,133 @@ Inductive Inner : Type :=
 
 Inductive ExtractTest : Inner -> Inner -> Type :=
 | extractTestI : forall (x:nat) (f:nat->Type) (t:f x),
-    ExtractTest (innerI_inner (innerI_nat x)) (innerI_fun f)
-| extractTestI_other : forall (x:nat) (f:nat->Type) (t:f x), ExtractTest (innerI_inner (innerI_nat x)) (innerI_fun f)
+    ExtractTest (innerI_inner (innerI_nat x)) (innerI_fun f) 
+| extractTestI_other : forall (x:nat) (f:nat->Type) (t:f x), ExtractTest (innerI_inner (innerI_nat x)) (innerI_fun f) 
 | extractTestI_extra : forall inner, ExtractTest inner inner
-| extractTestI_extra_const: ExtractTest innerI_extra innerI_extra.
+| extractTestI_extra_const: ExtractTest  innerI_extra innerI_extra .
+
+BuildProjectable extractTestI 2.
+
+
+Definition extract (i0 i1:Inner) (e:ExtractTest i0 i1) (d0:nat->Type) (d1:nat) :=
+    match e with
+	     | extractTestI x f t =>
+             fun
+               _ : match innerI_fun f with
+                   | innerI_fun f0 => fun _ : nat -> Type => f0
+                   | _ => fun t0 : nat -> Type => t0
+                   end d0
+                     (match innerI_inner (innerI_nat x) with
+                      | innerI_inner i =>
+                          match i with
+                          | innerI_nat x0 => fun _ : nat => x0
+                          | _ => fun t0 : nat => t0
+                          end
+                      | _ => fun t0 : nat => t0
+                      end d1) =>
+             t
+         | extractTestI_other x f _ =>
+             fun
+               H : match innerI_fun f with
+                   | innerI_fun f0 => fun _ : nat -> Type => f0
+                   | _ => fun t : nat -> Type => t
+                   end d0
+                     (match innerI_inner (innerI_nat x) with
+                      | innerI_inner i =>
+                          match i with
+                          | innerI_nat x0 => fun _ : nat => x0
+                          | _ => fun t : nat => t
+                          end
+                      | _ => fun t : nat => t
+                      end d1) =>
+             H
+         | extractTestI_extra inner =>
+             fun
+               H : match inner with
+                   | innerI_fun f => fun _ : nat -> Type => f
+                   | _ => fun t : nat -> Type => t
+                   end d0
+                     (match inner with
+                      | innerI_inner i =>
+                          match i with
+                          | innerI_nat x => fun _ : nat => x
+                          | _ => fun t : nat => t
+                          end
+                      | _ => fun t : nat => t
+                      end d1) =>
+             H
+         | extractTestI_extra_const =>
+             fun
+               H : match innerI_extra with
+                   | innerI_fun f => fun _ : nat -> Type => f
+                   | _ => fun t : nat -> Type => t
+                   end d0
+                     (match innerI_extra with
+                      | innerI_inner i =>
+                          match i with
+                          | innerI_nat x => fun _ : nat => x
+                          | _ => fun t : nat => t
+                          end
+                      | _ => fun t : nat => t
+                      end d1) =>
+             H
+         end.
+
+Print extract.
+
+
+Definition extract (i0 i1 :Inner) (e: ExtractTest i0 i1) (d0:nat->Type) (d1:nat) :=
+match e in ExtractTest i0 i1 return 
+(match i1 with
+| innerI_fun f0 => fun _ : nat -> Type => f0
+| _ => fun t0 : nat -> Type => t0
+end d0
+    (match i0 with
+    | innerI_inner i =>
+        match i with
+        | innerI_nat x0 => fun _ : nat => x0
+        | _ => fun t0 : nat => t0
+        end
+    | _ => fun t0 : nat => t0
+    end d1))
+-> 
+(match i1 with
+| innerI_fun f0 => fun _ : nat -> Type => f0
+| _ => fun t0 : nat -> Type => t0
+end d0
+    (match i0 with
+    | innerI_inner i =>
+        match i with
+        | innerI_nat x0 => fun _ : nat => x0
+        | _ => fun t0 : nat => t0
+        end
+    | _ => fun t0 : nat => t0
+    end d1)) 
+with 
+| extractTestI x f t => fun _ => t 
+| _ => fun t => t 
+end.
+Print extract.
+
+Lemma congruence_test (x : nat) (f : nat -> Type) t1 t2 : extractTestI x f t1 = extractTestI x f t2 -> t1 = t2.
+Proof.
+Fail congruence.
+intros E.
+apply (f_equal (fun e => extract  (innerI_inner (innerI_nat x)) (innerI_fun f) e f x t1)) in E.
+cbn in E.
+exact E.
+Qed.
+
+BuildProjectable extractTestI 2.
+
+
+BuildProjectable S 0.
+
 
 IsProjectable S 0.
-BuildProjectable S 0.
+
+
 IsProjectable extractTestI 2.
-BuildProjectable extractTestI 2.
 
 Definition proj_extract_test_x (inner_ix:Inner) : nat -> nat.
 Proof.
@@ -40,12 +158,12 @@ Defined.
 
 
 Definition extract 
-  (x1 : nat -> Type)
-  (x2 : nat)
   (i1 : Inner)
   (i2 : Inner)
-  (e : ExtractTest i1 i2) :
-    (proj_extract_test_f i2 x2) (proj_extract_test_x i1 x2) -> 
+  (e : ExtractTest i1 i2) 
+  (x1 : nat -> Type)
+  (x2 : nat):
+    (proj_extract_test_f i2 x1) (proj_extract_test_x i1 x2) -> 
     (proj_extract_test_f i2 x1) (proj_extract_test_x i1 x2).
 Proof.
 refine (match e with
@@ -53,6 +171,8 @@ refine (match e with
 | _ => fun t => t
 end).
 Defined.
+
+Print extract.
 
 Lemma congruence_test (x : nat) (f : nat -> Type) t1 t2 : extractTestI x f t1 = extractTestI x f t2 -> t1 = t2.
 Proof.
