@@ -1,5 +1,10 @@
 MyHelloWorld.
 
+Goal forall x y, S x = S y -> x = y.
+Proof.
+congruence.
+Qed.
+
 Inductive Inner : Type :=
 | innerI_nat : forall (x:nat), Inner
 | innerI_fun : forall (f:nat->Type), Inner
@@ -14,6 +19,113 @@ Inductive ExtractTest : Inner -> Inner -> Type :=
 | extractTestI_extra_const: ExtractTest  innerI_extra innerI_extra .
 
 BuildProjectable extractTestI 2.
+
+Definition extract :=
+    (fun (i0 i1 : Inner) (e : ExtractTest i0 i1) (d0 : nat -> Type) (d1 : nat) =>
+ match
+   e in (ExtractTest i i2)
+   return
+	 (match i2 with
+      | innerI_fun f => fun _ : nat -> Type => f
+      | _ => fun t : nat -> Type => t
+      end d0
+        (match i with
+         | innerI_inner i3 =>
+             match i3 with
+             | innerI_nat x => fun _ : nat => x
+             | _ => fun t : nat => t
+             end
+         | _ => fun t : nat => t
+         end d1) ->
+      match i2 with
+      | innerI_fun f => fun _ : nat -> Type => f
+      | _ => fun t : nat -> Type => t
+      end d0
+        (match i with
+         | innerI_inner i3 =>
+             match i3 with
+             | innerI_nat x => fun _ : nat => x
+             | _ => fun t : nat => t
+             end
+         | _ => fun t : nat => t
+         end d1))
+ with
+ | extractTestI x f t =>
+     fun
+       _ : match innerI_fun f with
+           | innerI_fun f0 => fun _ : nat -> Type => f0
+           | _ => fun t0 : nat -> Type => t0
+           end d0
+             (match innerI_inner (innerI_nat x) with
+              | innerI_inner i =>
+                  match i with
+                  | innerI_nat x0 => fun _ : nat => x0
+                  | _ => fun t0 : nat => t0
+                  end
+              | _ => fun t0 : nat => t0
+              end d1) =>
+     t
+ | extractTestI_other x f _ =>
+     fun
+       H : match innerI_fun f with
+           | innerI_fun f0 => fun _ : nat -> Type => f0
+           | _ => fun t : nat -> Type => t
+           end d0
+             (match innerI_inner (innerI_nat x) with
+              | innerI_inner i =>
+                  match i with
+                  | innerI_nat x0 => fun _ : nat => x0
+                  | _ => fun t : nat => t
+                  end
+              | _ => fun t : nat => t
+              end d1) =>
+     H
+ | extractTestI_extra inner =>
+     fun
+       H : match inner with
+           | innerI_fun f => fun _ : nat -> Type => f
+           | _ => fun t : nat -> Type => t
+           end d0
+             (match inner with
+              | innerI_inner i =>
+                  match i with
+                  | innerI_nat x => fun _ : nat => x
+                  | _ => fun t : nat => t
+                  end
+              | _ => fun t : nat => t
+              end d1) =>
+     H
+ | extractTestI_extra_const =>
+     fun
+       H : match innerI_extra with
+           | innerI_fun f => fun _ : nat -> Type => f
+           | _ => fun t : nat -> Type => t
+           end d0
+             (match innerI_extra with
+              | innerI_inner i =>
+                  match i with
+                  | innerI_nat x => fun _ : nat => x
+                  | _ => fun t : nat => t
+                  end
+              | _ => fun t : nat => t
+              end d1) =>
+     H
+ end).
+
+Print extract.
+
+Lemma congruence_test (x : nat) (f : nat -> Type) t1 t2 : extractTestI x f t1 = extractTestI x f t2 -> t1 = t2.
+Proof.
+congruence.
+Qed.
+intros E.
+apply (f_equal (fun e => extract (innerI_inner (innerI_nat x)) (innerI_fun f) e f x t1)) in E.
+cbn in E.
+exact E.
+Qed.
+
+
+
 
 
 Definition extract (i0 i1:Inner) (e:ExtractTest i0 i1) (d0:nat->Type) (d1:nat) :=

@@ -195,46 +195,54 @@ type projectable_result =
   | NotProjectable
   | Error
 
-let is_projectable env sigma term i : projectable_result =
+let is_projectable env sigma (cstr:Constr.pconstructor) i : projectable_result =
+  let open Pp in
+  let (c,u) = cstr in
+  Feedback.msg_debug
+    (str "projectability test of " ++ Printer.pr_constructor env c ++ str " on index " ++ Pp.int i);
+    if i >= 0 && i < Inductiveops.constructor_nallargs env c then (
+      (* let sigma, constructor_type = Typing.type_of env sigma term in *)
+      let constructor_type =
+        Inductiveops.e_type_of_constructor env sigma (c, EConstr.EInstance.make u)
+      in
+      let field_env, field_type, field_target =
+        get_ith_field_type env constructor_type i
+      in
+      let target_env, target_type, lifted_field_type =
+        constructor_target field_env field_target field_type
+      in
+      let target_sigma = Evd.from_env target_env in
+      Feedback.msg_debug
+        (str "projecting type "
+        ++ Printer.pr_econstr_env target_env target_sigma lifted_field_type
+        ++ str " from "
+        ++ Printer.pr_econstr_env target_env target_sigma target_type);
+      let field_sigma = Evd.from_env field_env in
+      if is_dependent field_sigma field_type i then(
+        Feedback.msg_debug (Pp.str "Dependent");
+        match EConstr.kind sigma target_type with 
+        | App (_, args) -> (
+          Feedback.msg_debug (Pp.str "Searching for composition");
+          match find_composition target_env target_sigma args lifted_field_type with
+          | Some r -> Dependent r
+          | None -> NotProjectable
+          )
+          | _ -> NotProjectable
+      )
+      else Simple)
+    else (
+      Feedback.msg_debug (Pp.str "Index out of bounce");
+      Error)
+
+
+let is_projectable_econstr env sigma term i : projectable_result =
   let open Pp in
   let print t = Printer.pr_econstr_env env sigma t in
   Feedback.msg_debug
     (str "projectability test of " ++ print term ++ str " on index " ++ Pp.int i);
   match EConstr.kind sigma term with
-  | Construct (c, u) ->
-      if i >= 0 && i < Inductiveops.constructor_nallargs env c then (
-        (* let sigma, constructor_type = Typing.type_of env sigma term in *)
-        let constructor_type =
-          Inductiveops.e_type_of_constructor env sigma (c, u)
-        in
-        let field_env, field_type, field_target =
-          get_ith_field_type env constructor_type i
-        in
-        let target_env, target_type, lifted_field_type =
-          constructor_target field_env field_target field_type
-        in
-        let target_sigma = Evd.from_env target_env in
-        Feedback.msg_debug
-          (str "projecting type "
-          ++ Printer.pr_econstr_env target_env target_sigma lifted_field_type
-          ++ str " from "
-          ++ Printer.pr_econstr_env target_env target_sigma target_type);
-        let field_sigma = Evd.from_env field_env in
-        if is_dependent field_sigma field_type i then(
-          Feedback.msg_debug (Pp.str "Dependent");
-          match EConstr.kind sigma target_type with 
-          | App (_, args) -> (
-            Feedback.msg_debug (Pp.str "Searching for composition");
-            match find_composition target_env target_sigma args lifted_field_type with
-            | Some r -> Dependent r
-            | None -> NotProjectable
-            )
-            | _ -> NotProjectable
-        )
-        else Simple)
-      else (
-        Feedback.msg_debug (Pp.str "Index out of bounce");
-        Error)
+  | Construct (c,u) ->
+      is_projectable env sigma (c, EConstr.EInstance.kind sigma u) i
   | _ ->
       Feedback.msg_debug (Pp.str "Term is not a Constructor");
       Error
@@ -287,6 +295,26 @@ let get_default_list_annots env sigma composition_result =
     | FromIndex (_, term_type, _, _) -> ((annot_of_string_numbered "d" (Some i) EConstr.ERelevance.relevant, term_type)::l, i+1)
   in
     helper composition_result 0 []
+
+let rec get_extracted_term env sigma term extraction =
+  match extraction with 
+    (* The end of extraction is reached *)
+    | Id -> term
+    (* (constructor from to extract with universe, arg index to extract, nested further extraction) *)
+    | Extraction (_, i, extraction) -> 
+      let (_, args) = EConstr.decompose_app sigma term in
+      get_extracted_term env sigma args.(i) extraction
+
+
+let rec get_defaults_from_args env sigma args composition_result =
+  match composition_result with
+    | Composition ((_, f_composition), arg_compositions) ->(
+      let f_defaults = get_defaults_from_args env sigma args f_composition in 
+      let arg_defaults =  List.concat_map (fun (_, composition) -> get_defaults_from_args env sigma args composition) (Array.to_list arg_compositions) in 
+      List.append f_defaults arg_defaults 
+    )
+    | FromIndex (_, _, i, extraction) -> [get_extracted_term env sigma args.(i) extraction]
+    | InEnv e -> [e]
 
 (* match term and return i'th (0 based) field of constructor c*)
 let build_simple_projection env sigma e_type (((ind,pos) as cosntr,u) as c) i =
@@ -365,6 +393,79 @@ let make_case_with_branch_map env sigma e ctype p branch_map =
   Inductiveops.make_case_or_project env sigma indt ci (p, rci) e (Array.of_list brl)
 
 
+
+let build_dependent_projection env sigma c i composition_result =
+  let ((ind,pos),u) = c in 
+  let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
+  let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
+  let e_type = EConstr.mkApp (EConstr.mkIndU (ind,u), (pack_rel_args_array n_index_annots)) in 
+  let env_inner = push_e_rel_assums (List.rev index_annots_list) env in 
+  let env_inner = push_e_rel_assums [(annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)] env_inner in
+  let sigma_inner = Evd.from_env env_inner in
+  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
+  let IndType(ind_fam,_) = Inductiveops.find_rectype env_inner sigma_inner e_type in
+  let cst_sums = Inductiveops.get_constructors env_inner ind_fam in
+  Feedback.msg_debug Pp.(str "e_type: " ++ print e_type);
+  let (default_annots_list, n_default_annots) = get_default_list_annots env_inner sigma composition_result in
+  let env_inner = push_e_rel_assums (List.rev default_annots_list) env_inner in
+  let sigma_inner = Evd.from_env env_inner in
+  let type_annotation_template = build_dependent_projection_type env_inner sigma_inner composition_result default_annots_list n_default_annots index_annots_list n_index_annots in 
+  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
+  Feedback.msg_debug Pp.(str "PROJECTION_TYPE:\n" ++ print type_annotation_template);
+  let nargs = Inductiveops.constructor_nrealargs env_inner (fst  c) in 
+  (*+1 because it is under a function*)
+  let match_indices (cst_sum:Inductiveops.constructor_summary) type_annot_template =(
+    let cst_type = Inductiveops.type_of_constructor env cst_sum.cs_cstr in
+    let (_,concl_type,_) = constructor_target env cst_type (EConstr.mkRel 1) in
+    let (_,args) = EConstr.decompose_app sigma_inner concl_type in
+    let type_annot = EConstr.Vars.lift cst_sum.cs_nargs type_annot_template in
+    let rec helper i j n return_type = 
+      if j <= n then return_type
+      else(
+          helper (i+1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+cst_sum.cs_nargs)) args.(i) return_type)
+        ) 
+    in 
+    helper 0 (n_index_annots+n_default_annots+1) (n_default_annots+1) type_annot
+  )
+  in
+  let special_index = (nargs - i + 1) in 
+  let special_type = match_indices cst_sums.(pos-1) type_annotation_template in
+  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
+  Feedback.msg_debug Pp.(str "SPECIAL_TYPE:\n" ++ print special_type);
+  let e_index = n_default_annots + 1 in
+  let make_return_type type_annotation_template = (
+    let return_type = EConstr.Vars.lift (n_index_annots+1) type_annotation_template in
+    let rec helper i j n return_type = 
+      if j <= n then return_type
+      else(
+          helper (i-1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+n_index_annots+1)) (EConstr.mkRel i) return_type)
+        ) 
+    in 
+    let return_type = helper (n_index_annots+1) (n_index_annots+n_default_annots+1) (n_default_annots+1) return_type in
+    EConstr.mkProd (Context.make_annot Names.Name.Anonymous EConstr.ERelevance.relevant, return_type, EConstr.Vars.lift 1 return_type)
+  ) in
+  let e_match = make_case_with_branch_map env_inner sigma_inner (EConstr.mkRel e_index) e_type (make_return_type type_annotation_template)
+    (fun cst_sums  i -> 
+      if i == pos then 
+        let x = (EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, special_type, EConstr.mkRel special_index)) cst_sums.(i-1).cs_args) in 
+      Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
+      x
+    else 
+      (
+        let defaulttype = match_indices cst_sums.(i-1) type_annotation_template in 
+        let x =(EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, defaulttype, EConstr.mkRel 1)) cst_sums.(i-1).cs_args) in
+        Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
+        x
+      )
+    )       
+  in 
+  Feedback.msg_debug Pp.(str "E_MATCH: " ++ print e_match);
+  let (sigma_inner, type_of_e_match) = Typing.type_of env_inner sigma_inner e_match in
+  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
+  Feedback.msg_debug Pp.(str "TYPE_OF:\n" ++ print type_of_e_match);
+  pack_lambda ((annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)::index_annots_list) (pack_lambda default_annots_list e_match)
+
+
 let build_projection env sigma constructor_term i =
   let print t = Printer.pr_econstr_env env sigma t in
   Feedback.msg_debug Pp.(
@@ -378,77 +479,13 @@ let build_projection env sigma constructor_term i =
       let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
       let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
       let e_type = EConstr.mkApp (EConstr.mkIndU (ind,u), (pack_rel_args_array n_index_annots)) in 
-      let env_inner = push_e_rel_assums (List.rev index_annots_list) env in 
-      let env_inner = push_e_rel_assums [(annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)] env_inner in
-      let sigma_inner = Evd.from_env env_inner in
-      let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-      let IndType(ind_fam,_) = Inductiveops.find_rectype env_inner sigma_inner e_type in
-      let cst_sums = Inductiveops.get_constructors env_inner ind_fam in
-      Feedback.msg_debug Pp.(str "e_type: " ++ print e_type);
-    match is_projectable env_inner sigma_inner constructor_term i with
-    | Simple -> Some (build_simple_projection env_inner sigma_inner e_type c i)
-    | Dependent composition_result ->(
-      let (default_annots_list, n_default_annots) = get_default_list_annots env_inner sigma composition_result in
-      let env_inner = push_e_rel_assums (List.rev default_annots_list) env_inner in
-      let sigma_inner = Evd.from_env env_inner in
-      let type_annotation_template = build_dependent_projection_type env_inner sigma_inner composition_result default_annots_list n_default_annots index_annots_list n_index_annots in 
-      let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-      Feedback.msg_debug Pp.(str "PROJECTION_TYPE:\n" ++ print type_annotation_template);
-      let nargs = Inductiveops.constructor_nrealargs env_inner (fst  c) in 
-      (*+1 because it is under a function*)
-      let match_indices (cst_sum:Inductiveops.constructor_summary) type_annot_template =(
-        let cst_type = Inductiveops.type_of_constructor env cst_sum.cs_cstr in
-        let (_,concl_type,_) = constructor_target env cst_type (EConstr.mkRel 1) in
-        let (_,args) = EConstr.decompose_app sigma_inner concl_type in
-        let type_annot = EConstr.Vars.lift cst_sum.cs_nargs type_annot_template in
-        let rec helper i j n return_type = 
-          if j <= n then return_type
-          else(
-              helper (i+1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+cst_sum.cs_nargs)) args.(i) return_type)
-            ) 
-        in 
-        helper 0 (n_index_annots+n_default_annots+1) (n_default_annots+1) type_annot
+      match is_projectable_econstr env sigma constructor_term i with
+      | Simple -> Some (build_simple_projection env sigma e_type c i)
+      | Dependent composition_result -> (
+          Some (build_dependent_projection env sigma c i composition_result)
       )
-      in
-      let special_index = (nargs - i + 1) in 
-      let special_type = match_indices cst_sums.(pos-1) type_annotation_template in
-      let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-      Feedback.msg_debug Pp.(str "SPECIAL_TYPE:\n" ++ print special_type);
-      let e_index = n_default_annots + 1 in
-      let make_return_type type_annotation_template = (
-        let return_type = EConstr.Vars.lift (n_index_annots+1) type_annotation_template in
-        let rec helper i j n return_type = 
-          if j <= n then return_type
-          else(
-              helper (i-1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+n_index_annots+1)) (EConstr.mkRel i) return_type)
-            ) 
-        in 
-        let return_type = helper (n_index_annots+1) (n_index_annots+n_default_annots+1) (n_default_annots+1) return_type in
-        EConstr.mkProd (Context.make_annot Names.Name.Anonymous EConstr.ERelevance.relevant, return_type, EConstr.Vars.lift 1 return_type)
-      ) in
-      let e_match = make_case_with_branch_map env_inner sigma_inner (EConstr.mkRel e_index) e_type (make_return_type type_annotation_template)
-        (fun cst_sums  i -> 
-          if i == pos then 
-            let x = (EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, special_type, EConstr.mkRel special_index)) cst_sums.(i-1).cs_args) in 
-          Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
-          x
-        else 
-          (
-            let defaulttype = match_indices cst_sums.(i-1) type_annotation_template in 
-            let x =(EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, defaulttype, EConstr.mkRel 1)) cst_sums.(i-1).cs_args) in
-            Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
-            x
-          )
-        )       
-      in 
-      Feedback.msg_debug Pp.(str "E_MATCH: " ++ print e_match);
-      let (sigma_inner, type_of_e_match) = Typing.type_of env_inner sigma_inner e_match in
-      let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-      Feedback.msg_debug Pp.(str "TYPE_OF:\n" ++ print type_of_e_match);
-      Some (pack_lambda ((annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)::index_annots_list) (pack_lambda default_annots_list e_match))
-    )
-    | NotProjectable -> None
-    | Error -> None
+      | NotProjectable -> None
+      | Error -> None
   )
   | _ -> None
   
@@ -481,7 +518,7 @@ let is_projectable_command e i =
   let env = Global.env () in
   let sigma = Evd.from_env env in
   let sigma, term = Constrintern.interp_constr_evars env sigma e in
-  match is_projectable env sigma term i with
+  match is_projectable_econstr env sigma term i with
   | Simple -> Feedback.msg_debug (Pp.str "Simple")
   | Dependent _ -> Feedback.msg_debug (Pp.str "Dependant")
   | NotProjectable -> Feedback.msg_debug (Pp.str "Not Projectable")
