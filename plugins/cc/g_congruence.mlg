@@ -38,11 +38,3 @@ END
 VERNAC COMMAND EXTEND MyHelloWorld CLASSIFIED AS QUERY
 | [ "MyHelloWorld" ] -> {Feedback.msg_debug (Pp.str "MyHelloWorld")}
 END
-
-VERNAC COMMAND EXTEND IsProjectable CLASSIFIED AS QUERY
-| [ "IsProjectable" constr(e) natural(i) ] -> {Projectability.is_projectable_command e i}
-END
-
-VERNAC COMMAND EXTEND BuildProjectable CLASSIFIED AS QUERY
-| [ "BuildProjectable" constr(e) natural(i) ] -> {Projectability.build_projection_command e i}
-END

@@ -14,7 +14,7 @@ type composition =
 
 type projectable_result =
   | Simple
-  | Dependent of composition
+  | Dependent of (Evd.evar_map * composition)
   | NotProjectable
   | Error
     
@@ -37,7 +37,3 @@ val build_dependent_projection : Environ.env ->
   int ->
   composition ->
   Evd.econstr
-
-val is_projectable_command : Constrexpr.constr_expr -> int -> unit
-
-val build_projection_command : Constrexpr.constr_expr -> int -> unit

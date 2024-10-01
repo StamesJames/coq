@@ -291,7 +291,13 @@ let constr_of_term c = EConstr.of_constr (ATerm.constr c)
 
 let app_global_ env sigma ref args =
   let (sigma, c) = Evd.fresh_global env sigma (Lazy.force ref) in
-  Typing.checked_appvect env sigma c args
+  Feedback.msg_debug Pp.(str "NOW CHECK APPVECT");
+  let result = Typing.checked_appvect env sigma c args in 
+  Feedback.msg_debug Pp.(str "DONE CHECK APPVECT:");
+  let print t = Printer.pr_econstr_env env sigma t in 
+  Feedback.msg_debug (print (snd result));
+  result
+  
 
 (* Assumes ⊢ typ : Sort, ⊢ lhs : typ and ⊢ rhs : typ
    and p is a reified proof of "@eq typ lhs rhs" *)
@@ -351,7 +357,7 @@ let rec proof_term env sigma (typ, lhs, rhs) p = match p.p_rule with
   let projectability_result = Projectability.is_projectable env sigma cstr (argind-1) in
   match projectability_result with
   | Projectability.Simple -> (
-    Feedback.msg_debug Pp.(str "======================================\nSimple\n=============================================");
+    Feedback.msg_debug Pp.(str "======================================\nSimple\n======================================");
     let ti = constr_of_term prf.p_lhs in
     let tj = constr_of_term prf.p_rhs in
     let default = constr_of_term p.p_lhs in
@@ -361,30 +367,45 @@ let rec proof_term env sigma (typ, lhs, rhs) p = match p.p_rule with
     let sigma, prf = proof_term env sigma (argty, ti, tj) prf in
     app_global_ env sigma _f_equal [|argty; typ; proj; ti; tj; prf|]
     )
-  | Dependent composition_result -> (
-    Feedback.msg_debug Pp.(str "======================================\nDEPENDENT\n=============================================");
+  | Projectability.Dependent (sigma, composition_result) -> (
+    Feedback.msg_debug Pp.(str "======================================\nDEPENDENT\n======================================");
     let (c,u) = cstr in
     let ti = constr_of_term prf.p_lhs in
     let tj = constr_of_term prf.p_rhs in
     let default = constr_of_term p.p_lhs in
     let sigma, argty = type_and_refresh_ env sigma ti in
-    let sigma, prf = proof_term env sigma (argty, ti, tj) prf in
     (* Do I convert the universes correctly to go from a constr constructor to a eConstr constructor? *)
     let dependent_projection = Projectability.build_dependent_projection env sigma (c,EConstr.EInstance.make u) (argind-1) composition_result in 
-    Feedback.msg_debug Pp.(str "======================================\nDep Proj Build\n=============================================");
+    Feedback.msg_debug Pp.(str "======================================\nDep Proj Build\n======================================");
     let (_,indargs) = EConstr.decompose_app sigma argty in
     let default_list = Projectability.get_defaults_from_args env sigma indargs composition_result in
     let proj_args = Array.append (Array.append indargs [|EConstr.mkRel 1|]) (Array.append (Array.of_list default_list) [|default|]) in
     let proj = EConstr.mkLambda (Context.make_annot (Names.Name.mk_name (Nameops.make_ident "e" None)) EConstr.ERelevance.relevant, argty, 
     EConstr.mkApp (dependent_projection, proj_args)
     ) in
-    Feedback.msg_debug Pp.(str "======================================\nProj Build\n=============================================");
-    let print t = Printer.pr_econstr_env env sigma t in
+    Feedback.msg_debug Pp.(str "======================================\nProj Build\n======================================");
+    let print t = Printer.pr_econstr_env env sigma t in 
+    Feedback.msg_debug Pp.(str "ARGTY:\n" ++ print argty);
+    Feedback.msg_debug Pp.(str "TYP:\n" ++ print typ);
     Feedback.msg_debug Pp.(str "PROJ_TERM:\n" ++ print proj);
-    Feedback.msg_debug Pp.(str "PROJ_ARGS:\n" ++ seq  (List.map print (Array.to_list proj_args)));
+    Feedback.msg_debug Pp.(str "TI:\n" ++ print ti);
+    Feedback.msg_debug Pp.(str "TJ:\n" ++ print tj);
+    let sigma, prf = proof_term env sigma (argty, ti, tj) prf in
+    Feedback.msg_debug Pp.(str "PRF:\n" ++ print prf);
+    Feedback.msg_debug Pp.(str "PROJ_ARGS:\n" ++ seq  (List.map (fun e -> print e ++ str ", ") (Array.to_list proj_args)));
     app_global_ env sigma _f_equal [|argty; typ; proj; ti; tj; prf|]
   )
-  | _ -> raise Not_found
+  | NotProjectable | Error -> (
+    Feedback.msg_debug Pp.(str "======================================\nNot Projectable or Error\ntrying simple projection\n======================================");
+    let ti = constr_of_term prf.p_lhs in
+    let tj = constr_of_term prf.p_rhs in
+    let default = constr_of_term p.p_lhs in
+    let special = mkRel (nargs - argind+1) in
+    let sigma, argty = type_and_refresh_ env sigma ti in
+    let sigma, proj = build_projection env sigma argty cstr special default in
+    let sigma, prf = proof_term env sigma (argty, ti, tj) prf in
+    app_global_ env sigma _f_equal [|argty; typ; proj; ti; tj; prf|]
+    )
 
 
   (* prf : ⊢ ci v = ci w : Ind(args) *)
@@ -403,7 +424,15 @@ let proof_tac (typ, lhs, rhs) p : unit Proofview.tactic =
     let sigma = Proofview.Goal.sigma gl in
     let concl = Proofview.Goal.concl gl in
     let sigma, p = proof_term env sigma (typ, lhs, rhs) p in
+    let print t = Printer.pr_econstr_env env sigma t in 
+    Feedback.msg_debug Pp.(str "AFTER proof_term\n");
+    Feedback.msg_debug Pp.(str "proof_term\n" ++ print p);
+    Feedback.msg_debug Pp.(str "concl\n" ++ print concl);
+    Feedback.msg_debug Pp.(str "env:\n" ++ Printer.pr_context_of env sigma);
+    let (sigma, p_type) = Typing.type_of env sigma p in
+    Feedback.msg_debug Pp.(str "p_type\n" ++ print p_type);
     let sigma = Typing.check env sigma p concl in
+    Feedback.msg_debug Pp.(str "AFTER proof_term tpye check");
     Proofview.Unsafe.tclEVARS sigma <*> exact_no_check p
   end
 

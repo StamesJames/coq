@@ -1,3 +1,9 @@
+let get_ith_arg sigma i term=  
+  let (rels_to_arg,rest) = EConstr.decompose_prod_n sigma i term in 
+  let (arg_name,arg_type,rest) = EConstr.destProd sigma rest in
+  (rels_to_arg, (arg_name, arg_type), rest)
+
+(* [array_map_option f arr] maps f to arr returns Some when all calls retunr Some and None otherwise*)
 let array_map_option f arr = 
   let exception NoneFound in
   try 
@@ -9,63 +15,28 @@ let array_map_option f arr =
     ))
   with NoneFound -> None
 
-let rec pack_lambda l e = 
-  match l with 
-  | [] -> e 
-  | (annot,ty)::xs -> pack_lambda xs (EConstr.mkLambda (annot, ty, e))
-  
 
-let push_e_rel_assums l env =
-  let rec helper l env = 
-    match l with
-    | [] -> env
-    | x::xs -> helper xs (Termops.push_rel_assum x env)
-  in 
-    helper l env
-
-(* get the target of a nested Prod and its env. also lifts field_to_lift on its way *)
-let rec constructor_target env term field_to_lift =
-  let sigma = Evd.from_env env in
-  match EConstr.kind sigma term with
-  | Prod (name, ty, target_type) ->
-      constructor_target
-        (Termops.push_rel_assum (name, ty) env)
-        target_type
-        (EConstr.Vars.lift 1 field_to_lift)
-  | t -> (env, term, field_to_lift)
-
-(* get the ith field of a nested Prod and the rest of the prod and the env  *)
-let rec get_ith_field_type env term i =
-  let sigma = Evd.from_env env in
-  match EConstr.kind sigma term with
-  | Prod (name, ty, target_type) ->
-      if i == 0 then (env, ty, term)
-      else
-        get_ith_field_type
-          (Termops.push_rel_assum (name, ty) env)
-          target_type (i - 1)
-  | _ -> raise Not_found
-
-let rec is_dependent sigma term i =
+(* checkt wether term depents on the last i Rels *)
+let rec is_dependent env sigma term i =
   if i <= 0 then false
   else if Termops.dependent sigma (EConstr.mkRel i) term then true
-  else is_dependent sigma term (i - 1)
+  else is_dependent env sigma term (i - 1)
 
-let annot_of_string_numbered s i r = 
-  Context.make_annot (Names.Name.mk_name (Nameops.make_ident s (i))) r
+(* makes a annot of name s with optional number i and relevance r*)
+let make_annot_numbered s i r = 
+  Context.make_annot (Names.Name.mk_name (Nameops.make_ident s i)) r
 
-
+(* The type to express a type extraction *)
 type extraction = 
   (* The end of extraction is reached *)
   | Id 
   (* (constructor from to extract with universe, arg index to extract, nested further extraction) *)
   | Extraction of ((Names.constructor * EConstr.EInstance.t) * int * extraction)
-
-let rec extraction_to_pp env sigma extraction = 
+let rec print_extraction env sigma extraction = 
   match extraction with 
   | Id -> Pp.str "Id"
   | Extraction ((c,_), i , extraction) ->(
-    let nested_extraction_str = extraction_to_pp env sigma extraction in 
+    let nested_extraction_str = print_extraction env sigma extraction in 
     Pp.(
       str "extract " ++ 
       Printer.pr_constructor env c ++ 
@@ -77,6 +48,7 @@ let rec extraction_to_pp env sigma extraction =
     )
   )
 
+(* type to express a composition of a type to extract *)
 type composition = 
   (* ((the function getting applied, how to extract it), (argument to compose, how to extract it) list) *)
   | Composition of ((EConstr.t * composition) * (EConstr.t * composition) array)
@@ -84,14 +56,13 @@ type composition =
   | FromIndex of (EConstr.t * EConstr.types * int * extraction)
   (* The term is known from the environment so it doesn't have to be extracted *)
   | InEnv of EConstr.t
-
-let rec composition_to_pp env sigma composition : Pp.t= 
+let rec print_composition env sigma composition : Pp.t= 
   let print t = Printer.pr_econstr_env env sigma t in
   match composition with 
   | Composition ((f,f_composition), arg_compositions)->(
-    let f_composition_pp = composition_to_pp env sigma f_composition in 
+    let f_composition_pp = print_composition env sigma f_composition in 
     let arg_pps = Array.map (fun (arg, arg_composition) ->(
-      let arg_composition_pp = composition_to_pp env sigma arg_composition in 
+      let arg_composition_pp = print_composition env sigma arg_composition in 
       Pp.(
         str "(" ++ 
         print arg ++
@@ -110,55 +81,59 @@ let rec composition_to_pp env sigma composition : Pp.t=
   | FromIndex (t,t_type,i,extraction)-> Pp.(
     print t ++ str ":" ++ print t_type ++ 
     str " at " ++ int i ++ str " (" ++
-    extraction_to_pp env sigma extraction ++ str ")"
+    print_extraction env sigma extraction ++ str ")"
   )
   | InEnv _ -> Pp.(str "InEnv")
 
-let rec find_composition env sigma indices_to_compose_from term_to_compose : composition option =
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "find composition for: " ++ 
-    print term_to_compose ++ 
-    str " from " ++ 
-    seq (List.map (fun x -> print x ++ str ", ") (Array.to_list indices_to_compose_from)) 
-  );
+(* finds the composition of the term [term_to_compose] from the indices [indices_to_compose_from] *)
+let rec find_composition env sigma terms_to_compose_from term_to_compose : (Evd.evar_map * composition) option =
   match EConstr.kind sigma term_to_compose with
-  | Var _ | Const _ | Ind _ | Construct _ -> Some (InEnv term_to_compose)
-  | _ ->(
-    let composition_result = find_arg env sigma term_to_compose indices_to_compose_from in 
-    match composition_result with
+  (* globaly defined objects don't have to be extracted *)
+  | Var _ | Const _ | Ind _ | Construct _ -> Some (sigma, InEnv term_to_compose)
+  | _ -> (
+    (* search for a term from with the whole term can be extracted *)
+    let extractrion_arg_result = find_arg env sigma term_to_compose terms_to_compose_from in 
+    match extractrion_arg_result with
     | Some (i, extraction) ->
-      ( Feedback.msg_debug Pp.(str "found extraction in index " ++ int i); 
-      Some (FromIndex (term_to_compose, snd (Typing.type_of env sigma term_to_compose),  i, extraction)))
+      let (sigma, term_to_compose_type) = (Typing.type_of env sigma term_to_compose) in
+      (* term_to_compose:term_to_compose_type can be extracted from index i via extractrion *)      
+      Some (sigma, (FromIndex (term_to_compose, term_to_compose_type, i, extraction)))
     | None -> (
+      (* if no direct extraction was found we test wether we can compose the term from its subexpressions (currently only applicative terms are supported) *)
       match  EConstr.kind sigma term_to_compose with
       | App (f,args) -> (
-        Feedback.msg_debug Pp.(str "try to compose " ++ print term_to_compose);
-        Option.bind 
-        (find_composition env sigma indices_to_compose_from f)
-        (fun f_composition -> 
-          Option.map 
-            (fun args_composition -> (Composition ((f, f_composition), args_composition))) 
-            (array_map_option 
-              (fun e -> Option.map (fun arg_composition -> (e, arg_composition)) (find_composition env sigma indices_to_compose_from e)) 
-              args
-            )
+        let f_composition = find_composition env sigma terms_to_compose_from f in 
+        match f_composition with
+        | Some (sigma, f_composition) ->(
+          let sigma_ref = ref sigma in
+          let args_composition = 
+            array_map_option 
+              (fun e -> 
+                Option.map 
+                (fun (sigma, arg_composition) -> 
+                  sigma_ref := sigma; 
+                  (e, arg_composition)) 
+                (find_composition env !sigma_ref terms_to_compose_from e)
+              ) 
+              args 
+          in
+          let sigma = !sigma_ref in
+          match args_composition with 
+          | Some args_composition -> 
+            Some (sigma, Composition ((f, f_composition), args_composition))
+          | None -> None
         )
+        | _ -> None 
       )
       | _ -> None
     )
   )
 and find_extraction env sigma term_to_extract term_to_extract_from : extraction option =
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "find_extraction for " ++ 
-    print term_to_extract ++ 
-    str " from " ++ 
-    print term_to_extract_from
-  );
+  (* When the terms are equal we found the term we want to extract*)
   if EConstr.eq_constr_nounivs sigma term_to_extract term_to_extract_from 
   then Some Id 
   else
+    (* if the term_to_extract_from is a constroctor application, we can try to recursively extract the term from the constructor term *)
     match EConstr.kind sigma term_to_extract_from with
       | App (f, args) -> (
           match EConstr.kind sigma f with
@@ -167,20 +142,16 @@ and find_extraction env sigma term_to_extract term_to_extract_from : extraction 
                 find_arg env sigma term_to_extract args
               in
               match first_arg_option with
-              | Some (i, result) -> Some (Extraction (c, i, result))
+              | Some (i, result) -> 
+                (* we found a extraction for term by projecting the ith field from c and then extracting further with result *)
+                Some (Extraction (c, i, result))
               | None -> None
           )
           | _ -> None
       )
       | _ -> None
 and find_arg env sigma term_to_extract args : (int * extraction) option =
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "find_arg for " ++ 
-    print term_to_extract ++ 
-    str " from " ++ 
-    seq (List.map (fun e -> Pp.(print e ++ str ", ")) (Array.to_list args)) 
-  );
+  (* finds the first arg from which the term can be extracted *)
   Seq.find_map
   (fun (i, x) ->
     Option.map
@@ -191,97 +162,85 @@ and find_arg env sigma term_to_extract args : (int * extraction) option =
 
 type projectable_result =
   | Simple
-  | Dependent of composition
+  | Dependent of (Evd.evar_map * composition)
   | NotProjectable
   | Error
 
-let is_projectable env sigma (cstr:Constr.pconstructor) i : projectable_result =
-  let open Pp in
-  let (c,u) = cstr in
-  Feedback.msg_debug
-    (str "projectability test of " ++ Printer.pr_constructor env c ++ str " on index " ++ Pp.int i);
-    if i >= 0 && i < Inductiveops.constructor_nallargs env c then (
-      (* let sigma, constructor_type = Typing.type_of env sigma term in *)
+let is_projectable env sigma (((ind,pos) as c,u):Constr.pconstructor) i : projectable_result =
+  (* i is the field index seen in realargs *)
+  let ind_nparams = Inductiveops.inductive_nparams env ind in
+    if i >= 0 && i < Inductiveops.constructor_nrealargs env c then (
+      (* Constructor type with all params indices and arguments *)
       let constructor_type =
         Inductiveops.e_type_of_constructor env sigma (c, EConstr.EInstance.make u)
       in
-      let field_env, field_type, field_target =
-        get_ith_field_type env constructor_type i
-      in
-      let target_env, target_type, lifted_field_type =
-        constructor_target field_env field_target field_type
-      in
-      let target_sigma = Evd.from_env target_env in
-      Feedback.msg_debug
-        (str "projecting type "
-        ++ Printer.pr_econstr_env target_env target_sigma lifted_field_type
-        ++ str " from "
-        ++ Printer.pr_econstr_env target_env target_sigma target_type);
-      let field_sigma = Evd.from_env field_env in
-      if is_dependent field_sigma field_type i then(
-        Feedback.msg_debug (Pp.str "Dependent");
+      let (field_local_rels, (field_annot,field_type), field_rest) = get_ith_arg sigma (i+ind_nparams) constructor_type in
+      let field_env = 
+        EConstr.push_rel_context (List.map (fun (x,y) -> Context.Rel.Declaration.LocalAssum (x,y)) (field_local_rels)) env 
+      in 
+      let print t = Printer.pr_econstr_env field_env sigma t in
+      Feedback.msg_debug Pp.(str "FIELD_TYPE:\n"++print field_type);
+      let field_rest_env = 
+        EConstr.push_rel (Context.Rel.Declaration.LocalAssum (field_annot,field_type)) field_env 
+      in 
+      let print t = Printer.pr_econstr_env field_rest_env sigma t in
+      Feedback.msg_debug Pp.(str "FIELD_TARGET:\n"++print field_rest);
+      let target_local_rels, target_type = EConstr.decompose_prod sigma field_rest in
+      let target_env = 
+        EConstr.push_rel_context (List.map (fun (x,y) -> Context.Rel.Declaration.LocalAssum (x,y)) target_local_rels) field_rest_env 
+      in 
+      let lifted_field_type = EConstr.Vars.lift (List.length target_local_rels+1) field_type in
+      let print t = Printer.pr_econstr_env target_env sigma t in
+      Feedback.msg_debug Pp.(str "TARGET_TYPE:\n"++print target_type);
+      Feedback.msg_debug Pp.(str "LIFTED_FIELD_TYPE:\n"++print lifted_field_type);
+
+      (* we don't want the inductive params to be seen as dependencies so we just check for the last i bindings *)
+      if is_dependent field_env sigma field_type i then(
         match EConstr.kind sigma target_type with 
         | App (_, args) -> (
-          Feedback.msg_debug (Pp.str "Searching for composition");
-          match find_composition target_env target_sigma args lifted_field_type with
-          | Some r -> Dependent r
+          match find_composition target_env sigma args lifted_field_type with
+          | Some (sigma, r) -> Dependent (sigma, r)
           | None -> NotProjectable
-          )
-          | _ -> NotProjectable
+        )
+        | _ -> NotProjectable
       )
       else Simple)
-    else (
-      Feedback.msg_debug (Pp.str "Index out of bounce");
-      Error)
+    else Error
 
-
-let is_projectable_econstr env sigma term i : projectable_result =
-  let open Pp in
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug
-    (str "projectability test of " ++ print term ++ str " on index " ++ Pp.int i);
-  match EConstr.kind sigma term with
-  | Construct (c,u) ->
-      is_projectable env sigma (c, EConstr.EInstance.kind sigma u) i
-  | _ ->
-      Feedback.msg_debug (Pp.str "Term is not a Constructor");
-      Error
 
 (* builds the nested match statement to follow the indices of the extractrion and returning type_to_extract->type_to_extract *)
 let rec build_extraction env sigma type_to_extract term term_type extraction_result =
   let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "build extraction: extract " ++
-    print type_to_extract ++
-    str "\nfrom\n" ++
-    print term ++ str ":" ++ print term_type ++
-    str "\nwith\n" ++
-    extraction_to_pp env sigma extraction_result
-  );
+  Feedback.msg_debug Pp.(str "=============BUILD_EXTRACTION============");
+  Feedback.msg_debug Pp.(str "TYPE_TO_EXTRACT:\n" ++ print type_to_extract);
+  Feedback.msg_debug Pp.(str "TERM:\n" ++ print term);
+  Feedback.msg_debug Pp.(str "TERM_TYPE:\n" ++ print term_type);
+  Feedback.msg_debug Pp.(str "=========================");
+  
   match extraction_result with
   | Id -> EConstr.mkLambda (Context.make_annot Names.Name.Anonymous EConstr.ERelevance.relevant, type_to_extract, EConstr.Vars.lift 1 term)
-  | Extraction (((_, pos), _) as c, i, next_extraction_result) -> (
-    let nargs = Inductiveops.constructor_nrealargs env (fst  c) in 
+  | Extraction (((ind, pos), _) as c, i, next_extraction_result) -> (
+    Feedback.msg_debug Pp.(str "CNSTR: " ++ Printer.pr_constructor env (fst c) ++ str "\nAT INDEX: " ++ int i);
+    let nargs = Inductiveops.constructor_nallargs env (fst  c) in 
+    Feedback.msg_debug Pp.(str "NARGS: " ++ int nargs);
     let next_term =  EConstr.mkRel (nargs - i) in 
+    Feedback.msg_debug Pp.(str "NEXT_TERM: " ++ print next_term);
     let constructor_type = Inductiveops.e_type_of_constructor env sigma c in
-    let (_, next_term_type, _) = get_ith_field_type env constructor_type i in
-    let default = EConstr.mkLambda (annot_of_string_numbered "t" None EConstr.ERelevance.relevant, type_to_extract, EConstr.mkRel 1) in 
+    Feedback.msg_debug Pp.(str "CONSTRUCTOR_TYPE: " ++ print constructor_type);
+    let ind_nparams = Inductiveops.inductive_nparams env ind in
+    Feedback.msg_debug Pp.(str "IND_NPARAMS: " ++ int ind_nparams);
+    let (_,(_,next_term_type),_) = get_ith_arg sigma (i+ind_nparams) constructor_type in
+    Feedback.msg_debug Pp.(str "NEXT_TERM_TYPE: " ++ print next_term_type);
+    let default = EConstr.mkLambda (make_annot_numbered "t" None EConstr.ERelevance.relevant, type_to_extract, EConstr.mkRel 1) in 
+    Feedback.msg_debug Pp.(str "DEFAULT: " ++ print default);
+    Feedback.msg_debug Pp.(str "=============BUILD_EXTRACTION SPECIAL============");
     let special = build_extraction env sigma type_to_extract next_term next_term_type next_extraction_result in
+    Feedback.msg_debug Pp.(str "--------------BUILD_EXTRACTION SPECIAL--------------");
+    Feedback.msg_debug Pp.(str "SPECIAL: " ++ print special);
     Combinators.make_selector env sigma ~pos ~special ~default term term_type
   )
 
-let get_index_list_annots env sigma inductive_type_term =
-  let rec helper term i l = 
-    match EConstr.kind sigma term with
-    | Prod (name,ty,rest) ->(
-      let annot = ((annot_of_string_numbered "i" (Some i) EConstr.ERelevance.relevant),ty) in 
-      helper rest (i+1) (annot::l)
-    )
-    | _ -> (l,i)
-  in 
-    helper  inductive_type_term 0 []
-
-let get_default_list_annots env sigma composition_result = 
+let get_defaults_rel_context env sigma composition_result : (EConstr.rel_context * int) = 
   let rec helper composition_result i l =
     match composition_result with
     | InEnv _ -> (l,i)
@@ -292,7 +251,7 @@ let get_default_list_annots env sigma composition_result =
         (f_list,i)
         (args_compositions)
     )
-    | FromIndex (_, term_type, _, _) -> ((annot_of_string_numbered "d" (Some i) EConstr.ERelevance.relevant, term_type)::l, i+1)
+    | FromIndex (_, term_type, _, _) -> (Context.Rel.Declaration.LocalAssum (make_annot_numbered "d" (Some i) EConstr.ERelevance.relevant, term_type)::l, i+1)
   in
     helper composition_result 0 []
 
@@ -305,7 +264,6 @@ let rec get_extracted_term env sigma term extraction =
       let (_, args) = EConstr.decompose_app sigma term in
       get_extracted_term env sigma args.(i) extraction
 
-
 let rec get_defaults_from_args env sigma args composition_result =
   match composition_result with
     | Composition ((_, f_composition), arg_compositions) ->(
@@ -314,42 +272,10 @@ let rec get_defaults_from_args env sigma args composition_result =
       List.append f_defaults arg_defaults 
     )
     | FromIndex (_, _, i, extraction) -> [get_extracted_term env sigma args.(i) extraction]
-    | InEnv e -> [e]
-
-(* match term and return i'th (0 based) field of constructor c*)
-let build_simple_projection env sigma e_type (((ind,pos) as cosntr,u) as c) i =
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "build simple projection for " ++ 
-    Printer.pr_constructor env cosntr ++ 
-    str " at " ++ int i);
-  let c_nargs = Inductiveops.constructor_nrealargs env (fst  c) in 
-  let c_type = Inductiveops.e_type_of_constructor env sigma c in
-  let (_, next_term_type, _) = get_ith_field_type env c_type i in
-  let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
-  let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
-  Feedback.msg_debug Pp.(str "INDICES:" ++ seq (List.map (fun (annot, ty) -> Names.Name.print (Context.binder_name annot) ++ str ":" ++ print ty ++ str ",") index_annots_list) );
-  let special = EConstr.mkLambda (Context.make_annot Names.Anonymous EConstr.ERelevance.relevant, next_term_type, EConstr.mkRel (c_nargs - i + 1)) in 
-  let default = EConstr.mkLambda (annot_of_string_numbered "t" None EConstr.ERelevance.relevant, next_term_type, EConstr.mkRel 1) in 
-  let match_term_env = push_e_rel_assums (List.rev index_annots_list) env in
-  let match_term_sigma = Evd.from_env match_term_env in 
-  let match_term = Combinators.make_selector match_term_env match_term_sigma ~pos ~special ~default (EConstr.mkRel 1) e_type in 
-  Feedback.msg_debug Pp.(str "match term:\n" ++ print match_term); 
-  let projection_term = pack_lambda index_annots_list (pack_lambda [(annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)] match_term) in 
-  Feedback.msg_debug Pp.(str "projection term:\n" ++ print projection_term); 
-  projection_term
+    | InEnv e -> []
 
 
-let build_dependent_projection_type env sigma composition_result default_annots_list n_default_annots index_annots_list n_index_annots =
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "build dependent projection type for composition:\n" ++
-    composition_to_pp env sigma composition_result ++
-    str "\nwith indices\n" ++ 
-    seq (List.map (fun (annot, ty) -> Names.Name.print (Context.binder_name annot) ++ str ":" ++ print ty ++ str ",") index_annots_list) ++ 
-    str "\nwith default\n" ++ 
-    seq (List.map (fun (annot, ty) -> Names.Name.print (Context.binder_name annot) ++ str ":" ++ print ty ++ str ",") default_annots_list)  
-  );
+let build_dependent_projection_type env sigma composition_result default_annots_list n_default_annots (index_annots_list:EConstr.rel_context) n_index_annots =
   let rec helper composition_result nth_extraction =
   match composition_result with 
   | Composition ((f,f_composition), args_compositions) ->(
@@ -361,8 +287,20 @@ let build_dependent_projection_type env sigma composition_result default_annots_
   )
   | FromIndex (t,type_to_extract,i,extraction) ->(
     let term_index = n_index_annots + n_default_annots + 1 - i in
-    let (_,term_type) = List.nth index_annots_list (i) in 
-    let extraction_term = build_extraction env sigma type_to_extract (EConstr.mkRel term_index) term_type extraction in 
+    let term_type = Context.Rel.Declaration.get_type (List.nth index_annots_list (n_index_annots - i -1)) in
+    let term = EConstr.mkRel term_index in
+    let print t = Printer.pr_econstr_env env sigma t in
+    Feedback.msg_debug Pp.(str "N_INDEX_ANNOTS: " ++ int n_index_annots);
+    Feedback.msg_debug Pp.(str "N_DEFAULT_ANNOTS: " ++ int n_default_annots);
+    Feedback.msg_debug Pp.(str "I: " ++ int i);
+    Feedback.msg_debug Pp.(str "TERM: " ++ print term);
+    Feedback.msg_debug Pp.(str "TERM_TYPE: " ++ print term_type);
+    Feedback.msg_debug Pp.(str "NTH_EXTRACTION: " ++ int nth_extraction);
+    Feedback.msg_debug Pp.(str "=============BUILD_EXTRACTION EXTRACTION TERM============");
+
+    let extraction_term = build_extraction env sigma type_to_extract term term_type extraction in 
+    Feedback.msg_debug Pp.(str "--------------BUILD_EXTRACTION EXTRACTION TERM--------------");
+
     (nth_extraction+1, EConstr.mkApp (extraction_term, [|EConstr.mkRel (n_default_annots - nth_extraction)|]))
   )
   | InEnv t -> (nth_extraction, t)
@@ -371,6 +309,17 @@ let build_dependent_projection_type env sigma composition_result default_annots_
 
 let pack_rel_args_array n =
   Array.init n (fun i -> EConstr.mkRel (n-i)) 
+
+let get_match_return_rel_context env sigma ctype = 
+  let IndType(indf,_) =
+  try Inductiveops.find_rectype env sigma ctype
+  with Not_found ->
+    CErrors.user_err
+      Pp.(str "Cannot discriminate on inductive constructors with \
+                dependent types.") in
+  let deparsign = Inductiveops.make_arity_signature env sigma true indf in
+  deparsign
+
 
 let make_case_with_branch_map env sigma e ctype p branch_map = 
   let IndType(indf,_) as indt =
@@ -389,137 +338,94 @@ let make_case_with_branch_map env sigma e ctype p branch_map =
   let ci = Inductiveops.make_case_info env ind RegularStyle in
   let deparsign = Inductiveops.make_arity_signature env sigma true indf in
   let p = EConstr.it_mkLambda_or_LetIn p deparsign in
-  Feedback.msg_debug Pp.(str "now make_case_or_project");
   Inductiveops.make_case_or_project env sigma indt ci (p, rci) e (Array.of_list brl)
 
 
-
-let build_dependent_projection env sigma c i composition_result =
-  let ((ind,pos),u) = c in 
+let build_dependent_projection env sigma (((ind,pos),u) as c) i composition_result =
+  Feedback.msg_debug Pp.(str "BUILD DEPENDENT PROJECTION:\n" ++ print_composition env sigma composition_result);
   let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
-  let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
-  let e_type = EConstr.mkApp (EConstr.mkIndU (ind,u), (pack_rel_args_array n_index_annots)) in 
-  let env_inner = push_e_rel_assums (List.rev index_annots_list) env in 
-  let env_inner = push_e_rel_assums [(annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)] env_inner in
-  let sigma_inner = Evd.from_env env_inner in
-  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-  let IndType(ind_fam,_) = Inductiveops.find_rectype env_inner sigma_inner e_type in
+  let print t = Printer.pr_econstr_env env sigma t in 
+  Feedback.msg_debug Pp.(str "TYPE_OF_INDUCTIVE:\n" ++ print type_of_inductive);
+  let (ind_allargs,_) = (EConstr.decompose_prod sigma type_of_inductive) in 
+  let ind_allargs = List.map (fun (x,y) -> Context.Rel.Declaration.LocalAssum (x,y)) ind_allargs in
+  let ind_nallargs = List.length ind_allargs in
+  let e_type = EConstr.mkApp (EConstr.mkIndU (ind,u), (pack_rel_args_array ind_nallargs)) in 
+  (* constructiong the first arguments for the projection to define the type of e *)
+  let env_inner = EConstr.push_rel_context (Context.Rel.Declaration.LocalAssum (make_annot_numbered "e" None EConstr.ERelevance.relevant, e_type)::ind_allargs) env in 
+  let IndType(ind_fam,_) = Inductiveops.find_rectype env_inner sigma e_type in
   let cst_sums = Inductiveops.get_constructors env_inner ind_fam in
-  Feedback.msg_debug Pp.(str "e_type: " ++ print e_type);
-  let (default_annots_list, n_default_annots) = get_default_list_annots env_inner sigma composition_result in
-  let env_inner = push_e_rel_assums (List.rev default_annots_list) env_inner in
-  let sigma_inner = Evd.from_env env_inner in
-  let type_annotation_template = build_dependent_projection_type env_inner sigma_inner composition_result default_annots_list n_default_annots index_annots_list n_index_annots in 
-  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-  Feedback.msg_debug Pp.(str "PROJECTION_TYPE:\n" ++ print type_annotation_template);
-  let nargs = Inductiveops.constructor_nrealargs env_inner (fst  c) in 
+  (* constructing the default valu_annots for the type extraction *)
+  let (defaults_rel_context, n_default_annots) = get_defaults_rel_context env_inner sigma composition_result in
+  let env_inner = EConstr.push_rel_context defaults_rel_context env_inner in
+  Feedback.msg_debug Pp.(str "BUILD");
+  let type_annotation_template = build_dependent_projection_type env_inner sigma composition_result defaults_rel_context n_default_annots ind_allargs ind_nallargs in
+  let print t = Printer.pr_econstr_env env_inner sigma t in 
+  Feedback.msg_debug Pp.(str "TYPE_ANNOTATION_TEMPLATE:\n" ++ print type_annotation_template);
+  Feedback.msg_debug Pp.(str "BUILD DONE");
+  (*let cnallargs = Inductiveops.constructor_nallargs env_inner (fst  c) in *)
+  let cnrealargs = Inductiveops.constructor_nrealargs env_inner (fst  c) in 
   (*+1 because it is under a function*)
   let match_indices (cst_sum:Inductiveops.constructor_summary) type_annot_template =(
+    Feedback.msg_debug Pp.(str "!!!!!!!!!!!!!!!!!!!!!!!\n" ++ Printer.pr_constructor env (fst cst_sum.cs_cstr) ++ str "\nnargs: " ++ int cst_sum.cs_nargs
+    ++ str "!!!!!!!!!!!!!!!!!!!!!!!!");
     let cst_type = Inductiveops.type_of_constructor env cst_sum.cs_cstr in
-    let (_,concl_type,_) = constructor_target env cst_type (EConstr.mkRel 1) in
-    let (_,args) = EConstr.decompose_app sigma_inner concl_type in
+    let concl_type = snd (EConstr.decompose_prod sigma cst_type) in
+    let (_,args) = EConstr.decompose_app sigma concl_type in
     let type_annot = EConstr.Vars.lift cst_sum.cs_nargs type_annot_template in
     let rec helper i j n return_type = 
       if j <= n then return_type
       else(
-          helper (i+1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+cst_sum.cs_nargs)) args.(i) return_type)
+          helper (i+1) (j-1) n (Termops.replace_term sigma (EConstr.mkRel (j+cst_sum.cs_nargs)) args.(i) return_type)
         ) 
     in 
-    helper 0 (n_index_annots+n_default_annots+1) (n_default_annots+1) type_annot
+    helper 0 (ind_nallargs+n_default_annots+1) (n_default_annots+1) type_annot
   )
   in
-  let special_index = (nargs - i + 1) in 
+  (*+1 beacause it is later under a function*)
+  let special_index = (cnrealargs - i +1) in 
   let special_type = match_indices cst_sums.(pos-1) type_annotation_template in
-  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-  Feedback.msg_debug Pp.(str "SPECIAL_TYPE:\n" ++ print special_type);
   let e_index = n_default_annots + 1 in
   let make_return_type type_annotation_template = (
-    let return_type = EConstr.Vars.lift (n_index_annots+1) type_annotation_template in
-    let rec helper i j n return_type = 
-      if j <= n then return_type
-      else(
-          helper (i-1) (j-1) n (Termops.replace_term sigma_inner (EConstr.mkRel (j+n_index_annots+1)) (EConstr.mkRel i) return_type)
-        ) 
+    (* lift the while term over the match as in bindings*)
+    let return_rel_context = get_match_return_rel_context env sigma e_type in
+    let n_return_rel_context = List.length return_rel_context in
+    Feedback.msg_debug Pp.(str "N_RETURN_REL_CONTEXT:\n" ++ int n_return_rel_context);
+    let return_type = EConstr.Vars.lift n_return_rel_context type_annotation_template in
+    (* replace the indices of the outer index terms with the inner bindings in the match as in  *)
+    
+    let rec helper i return_type = 
+      if i >= n_return_rel_context then return_type else 
+        helper (i+1) (Termops.replace_term sigma (EConstr.mkRel (n_return_rel_context+n_default_annots+1+ind_nallargs-i)) (EConstr.mkRel (ind_nallargs+1(*because e is binded another time*)-i)) return_type)
     in 
-    let return_type = helper (n_index_annots+1) (n_index_annots+n_default_annots+1) (n_default_annots+1) return_type in
+    let return_type = helper (Inductiveops.inductive_nparams env ind +1) return_type in
+    
     EConstr.mkProd (Context.make_annot Names.Name.Anonymous EConstr.ERelevance.relevant, return_type, EConstr.Vars.lift 1 return_type)
   ) in
-  let e_match = make_case_with_branch_map env_inner sigma_inner (EConstr.mkRel e_index) e_type (make_return_type type_annotation_template)
+  Feedback.msg_debug Pp.(str "RETRUN_TYPE:\n" ++ print (make_return_type type_annotation_template));
+  let e_match = make_case_with_branch_map env_inner sigma (EConstr.mkRel e_index) e_type (make_return_type type_annotation_template)
     (fun cst_sums  i -> 
       if i == pos then 
         let x = (EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, special_type, EConstr.mkRel special_index)) cst_sums.(i-1).cs_args) in 
-      Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
       x
     else 
       (
         let defaulttype = match_indices cst_sums.(i-1) type_annotation_template in 
         let x =(EConstr.it_mkLambda_or_LetIn (EConstr.mkLambda (Context.make_annot (Names.Name.Anonymous) EConstr.ERelevance.relevant, defaulttype, EConstr.mkRel 1)) cst_sums.(i-1).cs_args) in
-        Feedback.msg_debug Pp.(str "constr: " ++ int i ++ str ": " ++ print x);
         x
       )
     )       
   in 
-  Feedback.msg_debug Pp.(str "E_MATCH: " ++ print e_match);
-  let (sigma_inner, type_of_e_match) = Typing.type_of env_inner sigma_inner e_match in
-  let print t = Printer.pr_econstr_env env_inner sigma_inner t in
-  Feedback.msg_debug Pp.(str "TYPE_OF:\n" ++ print type_of_e_match);
-  pack_lambda ((annot_of_string_numbered "e" None EConstr.ERelevance.relevant, e_type)::index_annots_list) (pack_lambda default_annots_list e_match)
-
-
-let build_projection env sigma constructor_term i =
+  let result = EConstr.it_mkLambda_or_LetIn (EConstr.it_mkLambda_or_LetIn e_match defaults_rel_context) (Context.Rel.Declaration.LocalAssum (make_annot_numbered "e" None EConstr.ERelevance.relevant, e_type)::ind_allargs) in 
   let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "build projection for " ++
-    print constructor_term ++
-    str " at index " ++
-    int i
-    );
-    match EConstr.kind sigma constructor_term with
-    | Construct (((ind,pos),u) as c) ->(
-      let type_of_inductive = Inductiveops.type_of_inductive env (ind,u) in 
-      let (index_annots_list, n_index_annots) = get_index_list_annots env sigma type_of_inductive in
-      let e_type = EConstr.mkApp (EConstr.mkIndU (ind,u), (pack_rel_args_array n_index_annots)) in 
-      match is_projectable_econstr env sigma constructor_term i with
-      | Simple -> Some (build_simple_projection env sigma e_type c i)
-      | Dependent composition_result -> (
-          Some (build_dependent_projection env sigma c i composition_result)
-      )
-      | NotProjectable -> None
-      | Error -> None
-  )
-  | _ -> None
-  
+  Feedback.msg_debug Pp.(str "++++++++++++++++++++++++++++++++++++++++++++++++++++");
+  Feedback.msg_debug Pp.(str "result");
+  Feedback.msg_debug (print result );
+  Feedback.msg_debug Pp.(str "++++++++++++++++++++++++++++++++++++++++++++++++++++");
+  (*
+  let (sigma, type_of_result) = Typing.type_of env sigma result in
+  Feedback.msg_debug (print type_of_result );
+  *)
+  Feedback.msg_debug Pp.(str "++++++++++++++++++++++++++++++++++++++++++++++++++++");
+  result
 
-let build_projection_command e i =
-  let env = Global.env () in 
-  let sigma = Evd.from_env env in
-  let sigma, term = Constrintern.interp_constr_evars env sigma e in
-  let print t = Printer.pr_econstr_env env sigma t in
-  Feedback.msg_debug Pp.(
-    str "called build projection for: " ++
-    print term ++
-    str " on index " ++
-    int i 
-  ); 
-  match build_projection env sigma term i with
-  | Some proj -> (
-    Feedback.msg_debug (Pp.str "Projection found:"); 
-    Feedback.msg_debug (print proj);
-    let (sigma, proj_type) = Typing.type_of env sigma proj in
-    let print t = Printer.pr_econstr_env env sigma t in
-    Feedback.msg_debug Pp.(
-      str "Projection Type:\n" ++
-      print proj_type
-    )
-    )
-  | None -> Feedback.msg_debug (Pp.str "No Projection Found")
 
-let is_projectable_command e i =
-  let env = Global.env () in
-  let sigma = Evd.from_env env in
-  let sigma, term = Constrintern.interp_constr_evars env sigma e in
-  match is_projectable_econstr env sigma term i with
-  | Simple -> Feedback.msg_debug (Pp.str "Simple")
-  | Dependent _ -> Feedback.msg_debug (Pp.str "Dependant")
-  | NotProjectable -> Feedback.msg_debug (Pp.str "Not Projectable")
-  | Error -> Feedback.msg_debug (Pp.str "Error")
