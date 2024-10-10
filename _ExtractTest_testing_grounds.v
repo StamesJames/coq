@@ -1,5 +1,234 @@
 MyHelloWorld.
 
+Inductive TestInd (u:unit) : (nat->Type)->nat->Type :=
+|  testI : forall f x, f x -> TestInd u f x. 
+
+Inductive Inner : Type :=
+| innerI_nat : forall (x:nat), Inner
+| innerI_fun : forall (f:nat->Type), Inner
+| innerI_inner : forall (i:Inner), Inner
+| innerI_extra : Inner.
+
+Inductive ExtractTestParam (A:Type): Inner -> Inner -> unit -> Type :=
+| extractTestPI : unit -> unit -> forall (x:nat) (f:nat->Type) (t:f x),
+ExtractTestParam A (innerI_inner (innerI_nat x)) (innerI_fun f) tt
+| extractTestPI_other : forall (x:nat) (f:nat->Type) (t:f x), ExtractTestParam A (innerI_inner (innerI_nat x)) (innerI_fun f) tt
+| extractTestPI_extra : forall inner, ExtractTestParam A inner inner tt
+| extractTestPI_extra_const: ExtractTestParam A innerI_extra innerI_extra tt.
+
+Lemma congruenceParam_test (B:Type) (y : nat) (g : nat -> Type) t1 t2 : extractTestPI B tt tt y g t1 = extractTestPI B tt tt y g t2 -> t1 = t2.
+Proof.
+congruence.
+intros H.
+apply (
+    f_equal
+    (fun
+	                       e : ExtractTestParam B
+                                 (innerI_inner (innerI_nat y)) 
+                                 (innerI_fun g) tt =>
+                         match
+                           e in (ExtractTestParam _ i i0 u)
+                           return
+                             (fun
+                                _ : match i0 with
+                                    | innerI_fun f => f
+                                    | _ => g
+                                    end
+                                      match i with
+                                      | innerI_inner i1 =>
+                                          match i1 with
+                                          | innerI_nat x => x
+                                          | _ => y
+                                          end
+                                      | _ => y
+                                      end =>
+                              match i0 with
+                              | innerI_fun f => f
+                              | _ => g
+                              end
+                                match i with
+                                | innerI_inner i1 =>
+                                    match i1 with
+                                    | innerI_nat x => x
+                                    | _ => y
+                                    end
+                                | _ => y
+                                end)
+                         with
+                         | extractTestPI _ _ _ x f t =>
+                             fun
+                               _ : match innerI_fun f with
+                                   | innerI_fun f0 => f0
+                                   | _ => g
+                                   end
+                                     match innerI_inner (innerI_nat x) with
+                                     | innerI_inner i =>
+                                         match i with
+                                         | innerI_nat x0 => x0
+                                         | _ => y
+                                         end
+                                     | _ => y
+                                     end =>
+                             t
+                         | extractTestPI_other _ x f _ =>
+                             fun
+                               t : match innerI_fun f with
+                                   | innerI_fun f0 => f0
+                                   | _ => g
+                                   end
+                                     match innerI_inner (innerI_nat x) with
+                                     | innerI_inner i =>
+                                         match i with
+                                         | innerI_nat x0 => x0
+                                         | _ => y
+                                         end
+                                     | _ => y
+                                     end =>
+                             t
+                         | extractTestPI_extra _ inner =>
+                             fun
+                               t : match inner with
+                                   | innerI_fun f => f
+                                   | _ => g
+                                   end
+                                     match inner with
+                                     | innerI_inner i =>
+                                         match i with
+                                         | innerI_nat x => x
+                                         | _ => y
+                                         end
+                                     | _ => y
+                                     end =>
+                             t
+                         | extractTestPI_extra_const _ =>
+                             fun
+                               t : match innerI_extra with
+                                   | innerI_fun f => f
+                                   | _ => g
+                                   end
+                                     match innerI_extra with
+                                     | innerI_inner i =>
+                                         match i with
+                                         | innerI_nat x => x
+                                         | _ => y
+                                         end
+                                     | _ => y
+                                     end =>
+                             t
+                         end t1)
+) in H.
+
+congruence.
+Qed.
+(*
+Lemma extraction_TestInd u f x t1 t2 : testI u f x t1 = testI u f x t2 -> t1 = t2.
+Proof.
+congruence.
+Qed. *)
+
+
+
+
+       
+Lemma congruenceParam_test (B:Type) (y : nat) (g : nat -> Type) t1 t2 : extractTestPI B y g t1 = extractTestPI B y g t2 -> t1 = t2.
+Proof.
+intros H.
+apply 
+(f_equal
+    (fun e : ExtractTestParam B (innerI_inner (innerI_nat y)) (innerI_fun g) =>
+   match
+     e in (ExtractTestParam _ i i0)
+     return
+       (match i0 in Inner with
+        | innerI_fun f => f
+        | _ => g
+        end 
+          (match i with
+           | innerI_inner i1 =>
+               match i1 with
+               | innerI_nat x => x
+               | _ => y
+               end
+           | _ =>  y
+           end)) ->
+         (match i0 with
+         | innerI_fun f => f
+         | _ => g
+         end 
+         (match i with
+             | innerI_inner i1 =>
+                 match i1 with
+                 | innerI_nat x => x
+                 | _ => y
+                 end
+             | _ =>  y
+             end))
+   with
+   | extractTestPI _ x f t =>
+       fun
+         _ : match innerI_fun f with
+             | innerI_fun f0 => f0
+             | _ => g
+             end 
+               (match innerI_inner (innerI_nat x) with
+                | innerI_inner i =>
+                    match i with
+                    | innerI_nat x0 => x0
+                    | _ => y
+                    end
+                | _ => y
+                end) =>
+       t
+   | extractTestPI_other _ x f _ =>
+       fun
+         H1 : match innerI_fun f with
+              | innerI_fun f0 => f0
+              | _ => g
+              end
+                 (match innerI_inner (innerI_nat x) with
+                 | innerI_inner i =>
+                     match i with
+                     | innerI_nat x0 =>  x0
+                     | _ => y
+                     end
+                 | _ => y
+                 end) =>
+       H1
+   | extractTestPI_extra _ inner =>
+       fun
+         H1 : match inner with
+              | innerI_fun f =>  f
+              | _ => g
+              end 
+                (match inner with
+                 | innerI_inner i =>
+                     match i with
+                     | innerI_nat x =>  x
+                     | _ => y
+                     end
+                 | _ => y
+                 end ) =>
+       H1
+   | extractTestPI_extra_const _ =>
+       fun
+         H1 : match innerI_extra with
+              | innerI_fun f =>  f
+              | _ => g
+              end 
+                (match innerI_extra with
+                 | innerI_inner i =>
+                     match i with
+                     | innerI_nat x => x
+                     | _ => y
+                     end
+                 | _ => y
+                 end ) =>
+       H1
+   end t1)
+) in H.
+
+
+
 Inductive Inner : Type :=
 | innerI_nat : forall (x:nat), Inner
 | innerI_fun : forall (f:nat->Type), Inner
@@ -12,10 +241,7 @@ ExtractTestParam A (innerI_inner (innerI_nat x)) (innerI_fun f)
 | extractTestPI_other : forall (x:nat) (f:nat->Type) (t:f x), ExtractTestParam A (innerI_inner (innerI_nat x)) (innerI_fun f) 
 | extractTestPI_extra : forall inner, ExtractTestParam A inner inner
 | extractTestPI_extra_const: ExtractTestParam A innerI_extra innerI_extra.
-       
-Lemma congruenceParam_test (B:Type) (y : nat) (g : nat -> Type) t1 t2 : extractTestPI B y g t1 = extractTestPI B y g t2 -> t1 = t2.
-Proof.
-intros.
+.
 apply
 (f_equal (
 (fun
