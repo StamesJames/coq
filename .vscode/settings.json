@@ -1,0 +1,7 @@
+{
+    "makefile.configureOnOpen": false,
+    "coqtop.coqtopExe": "coqtop",
+    "coqtop.binPath": "_build/install/default/bin/",
+    "vscoq.path": "/workspaces/coq/_build/install/default/bin/",
+    "vscoq.proof.mode": 0,
+}

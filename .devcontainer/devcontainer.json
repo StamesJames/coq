@@ -1,0 +1,17 @@
+{
+    "name": "CoqPluginTutorial",
+    "build": {
+        "context": "..",
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "maximedenes.vscoq@0.3.9",
+                "ocamllabs.ocaml-platform",
+                "ms-azuretools.vscode-docker",
+                "ms-vscode.makefile-tools"
+            ]
+        }
+    }
+}
