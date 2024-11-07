@@ -787,17 +787,47 @@ let process_constructor_mark t i rep pac state =
             raise (Discriminable (s,opac,t,pac))
           else (* Match *)
             let cinfo = get_constructor_info state.uf pac.cnode in
-            let rec f n oargs args=
+            let env = Global.env () in 
+            let sigma = Evd.from_env env in
+            let econstr_class_type_rep = EConstr.of_constr (rep.class_type) in
+            let Inductiveops.IndType ((ind_family),ind_args) =
+            try Inductiveops.find_rectype env sigma econstr_class_type_rep
+              with Not_found ->
+                CErrors.user_err
+                Pp.(str "Cannot discriminate on inductive constructors with \
+                dependent types.") in
+            Feedback.msg_debug Pp.(str "rep: " ++ Printer.pr_econstr_env env sigma econstr_class_type_rep);
+            let (ind, ind_params) as ind_fam = Inductiveops.dest_ind_family ind_family in
+            let cnstr_sums = (Inductiveops.get_constructors env (Inductiveops.make_ind_family ind_fam)) in
+            let (cnstr, cnstr_u) = cinfo.ci_constr in 
+            let cnstr_sum = cnstr_sums.(snd cnstr - 1) in
+            let rec f n oargs args i =
               if n > 0 then
                 match (oargs,args) with
-                    s1::q1,s2::q2->
+                s1::q1,s2::q2->
+                  Feedback.msg_debug Pp.(str "i: " ++ int i);
+                  Feedback.msg_debug Pp.(str "length args: " ++ int (List.length cnstr_sum.cs_args));
+                  let at = aterm state.uf s1 in
+                  let () = Feedback.msg_debug (Printer.pr_constr_env env sigma (ATerm.constr at)) in 
+                  let field_type = Context.Rel.Declaration.get_type (List.nth cnstr_sum.cs_args (i-1)) in
+                  Feedback.msg_debug Pp.(str "field_type: " ++ Printer.pr_econstr_env env sigma field_type);
+                    let (_, proj_result) = Ccprojectability.projectability_test env sigma (cnstr, EConstr.EInstance.make cnstr_u) (n) field_type ind (Array.of_list ind_params) (Array.of_list ind_args) in
+                    (match proj_result with
+                    | Ccprojectability.Dependent _ |Simple -> (
+                      let () = Feedback.msg_debug Pp.(str "dependent") in
                       Queue.add
-                        {lhs=s1;rhs=s2;rule=Injection(s,opac,t,pac,n)}
-                        state.combine;
-                      f (n-1) q1 q2
+                      {lhs=s1;rhs=s2;rule=Injection(s,opac,t,pac,n)}
+                      state.combine;
+                      f (n-1) q1 q2 (i+1)
+                    )
+                    | Ccprojectability.NotProjectable -> (
+                      let () = Feedback.msg_debug Pp.(str "not projectable") in 
+                      f (n-1) q1 q2 (i+1)
+                    )
+                    )
                   | _-> anomaly ~label:"add_pacs"
                       (Pp.str "weird error in injection subterms merge.")
-            in f cinfo.ci_nhyps opac.args pac.args
+            in f cinfo.ci_nhyps opac.args pac.args 1
       | Partial_applied | Partial _ ->
 (*	  add_pac state.uf.map.(i) pac t; *)
           state.terms<-Int.Set.union rep.lfathers state.terms
